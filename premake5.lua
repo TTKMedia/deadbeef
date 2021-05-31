@@ -81,6 +81,9 @@ filter "platforms:Windows"
     "-include shared/windows/mingw32_layer.h",
     "-fno-builtin"
   }
+  linkoptions {
+    "-Wl,--export-all-symbols"
+  }
   includedirs {
     "shared/windows/include",
     "/mingw64/include/opus",
@@ -165,6 +168,17 @@ project "libdeletefromdisk"
   targetprefix ""
   files {
     "shared/deletefromdisk.c"
+  }
+  filter "platforms:not Windows"
+    buildoptions {"-fPIC"}
+
+project "libtftintutil"
+  kind "StaticLib"
+  language "C"
+  targetdir "."
+  targetprefix ""
+  files {
+    "shared/tftintutil.c"
   }
   filter "platforms:not Windows"
     buildoptions {"-fPIC"}
@@ -806,7 +820,7 @@ project "ddb_gui_GTK2"
     "plugins/libparser"
   }
   pkgconfig ("gtk+-2.0 jansson")
-  links {"libdeletefromdisk"}
+  links {"libdeletefromdisk", "libtftintutil"}
   defines ("GLIB_DISABLE_DEPRECATION_WARNINGS")
 end
 
@@ -830,7 +844,7 @@ project "ddb_gui_GTK3"
   }
 
   pkgconfig("gtk+-3.0 jansson")
-  links {"libdeletefromdisk"}
+  links {"libdeletefromdisk", "libtftintutil"}
   defines ("GLIB_DISABLE_DEPRECATION_WARNINGS")
 end
 

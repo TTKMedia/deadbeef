@@ -41,10 +41,22 @@
 #include "dspconfig.h"
 #include "wingeom.h"
 #include "hotkeys.h"
+#include "ctmapping.h"
 
 static GtkWidget *prefwin;
 
 static GSList *output_device_names;
+
+enum {
+    PLUGIN_LIST_COL_TITLE,
+    PLUGIN_LIST_COL_IDX,
+    PLUGIN_LIST_COL_BUILTIN,
+    PLUGIN_LIST_COL_HASCONFIG
+};
+
+static GtkListStore *pluginliststore;
+static GtkTreeModelFilter *pluginliststore_filtered;
+static GtkMenu *pluginlistmenu;
 
 static const char *
 _get_output_soundcard_conf_name (void) {
@@ -194,8 +206,38 @@ update_samplerate_widget_sensitivity (int override_sr, int dep_active) {
 
 
 void
+on_prefwin_response_cb (GtkDialog *dialog,
+                        int        response_id,
+                        gpointer   user_data) {
+    if (response_id != GTK_RESPONSE_CLOSE && response_id != GTK_RESPONSE_DELETE_EVENT) {
+        return;
+    }
+
+    if (gtkui_hotkeys_changed) {
+        GtkWidget *dlg = gtk_message_dialog_new (GTK_WINDOW (prefwin), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, _("You modified the hotkeys settings, but didn't save your changes."));
+        gtk_window_set_transient_for (GTK_WINDOW (dlg), GTK_WINDOW (prefwin));
+        gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dlg), _("Are you sure you want to continue without saving?"));
+        gtk_window_set_title (GTK_WINDOW (dlg), _("Warning"));
+        int response = gtk_dialog_run (GTK_DIALOG (dlg));
+        gtk_widget_destroy (dlg);
+        if (response == GTK_RESPONSE_NO) {
+            return;
+        }
+    }
+
+    dsp_setup_free ();
+    ctmapping_setup_free ();
+    gtk_widget_destroy (prefwin);
+    deadbeef->conf_save ();
+    prefwin = NULL;
+    pluginliststore = NULL;
+    pluginliststore_filtered = NULL;
+}
+
+void
 gtkui_run_preferences_dlg (void) {
     if (prefwin) {
+        gtk_window_present_with_time (prefwin, g_get_monotonic_time() / 1000);
         return;
     }
     deadbeef->conf_lock ();
@@ -276,6 +318,9 @@ gtkui_run_preferences_dlg (void) {
     
     // dsp
     dsp_setup_init (prefwin);
+
+    // content-type mapping dialog
+    ctmapping_setup_init (prefwin);
 
     // minimize_on_startup
     set_toggle_button("minimize_on_startup", deadbeef->conf_get_int ("gtkui.start_hidden", 0));
@@ -445,46 +490,93 @@ gtkui_run_preferences_dlg (void) {
         gtk_list_store_set (store, &it, 0, plugins[i]->inactive ? FALSE : TRUE, 1, plugins[i]->name, 2, plugins[i]->nostop ? FALSE : TRUE, -1);
     }
 #else
-    GtkListStore *store = gtk_list_store_new (1, G_TYPE_STRING);
-    GtkTreeViewColumn *col2 = gtk_tree_view_column_new_with_attributes (_("Title"), rend_text, "text", 0, NULL);
-    gtk_tree_view_append_column (tree, col2);
+    // Order is: title, index, builtin, hasconfig
+    GtkListStore *store = gtk_list_store_new (4, G_TYPE_STRING, G_TYPE_INT, G_TYPE_INT, G_TYPE_BOOLEAN);
+    pluginliststore = store;
+    GtkTreeViewColumn *col = gtk_tree_view_column_new_with_attributes (_("Title"), rend_text, "text", PLUGIN_LIST_COL_TITLE, "weight", PLUGIN_LIST_COL_BUILTIN, NULL);
+    gtk_tree_view_append_column (tree, col);
+    gtk_tree_view_set_headers_visible (tree, FALSE);
+    g_object_set (G_OBJECT (rend_text), "ellipsize", PANGO_ELLIPSIZE_END, NULL);
+
     DB_plugin_t **plugins = deadbeef->plug_get_list ();
     int i;
+    const char *plugindir = deadbeef->get_system_dir (DDB_SYS_DIR_PLUGIN);
     for (i = 0; plugins[i]; i++) {
         GtkTreeIter it;
+        const char *pluginpath;
         gtk_list_store_append (store, &it);
-        gtk_list_store_set (store, &it, 0, plugins[i]->name, -1);
+        pluginpath = deadbeef->plug_get_path_for_plugin_ptr (plugins[i]);
+        if (!pluginpath) {
+            pluginpath = plugindir;
+        }
+        gtk_list_store_set (store, &it,
+            PLUGIN_LIST_COL_TITLE, plugins[i]->name,
+            PLUGIN_LIST_COL_IDX, i,
+            PLUGIN_LIST_COL_BUILTIN, strstr(pluginpath, plugindir) ? PANGO_WEIGHT_NORMAL : PANGO_WEIGHT_BOLD,
+            PLUGIN_LIST_COL_HASCONFIG, plugins[i]->configdialog ? 1 : 0,
+            -1);
     }
 #endif
+    gtk_tree_sortable_set_sort_column_id (store, PLUGIN_LIST_COL_TITLE, GTK_SORT_ASCENDING);
+
+    // Create a filtered model, then we switch between the two models to show/hide configurable plugins
+    pluginliststore_filtered = gtk_tree_model_filter_new (GTK_TREE_MODEL (store), NULL);
+    gtk_tree_model_filter_set_visible_column (pluginliststore_filtered, PLUGIN_LIST_COL_HASCONFIG);
+
     gtk_tree_view_set_model (tree, GTK_TREE_MODEL (store));
 
-    gtk_widget_set_sensitive (lookup_widget (prefwin, "configure_plugin"), FALSE);
+    pluginlistmenu = create_plugin_list_popup_menu ();
+    gtk_menu_attach_to_widget (GTK_MENU (pluginlistmenu), GTK_WIDGET (tree), NULL);
+
+    // We do this here so one can leave the tabs visible in the Glade designer for convenience.
+    GtkNotebook *notebook = GTK_NOTEBOOK (lookup_widget (w, "plugin_notebook"));
+    gtk_notebook_set_show_tabs(notebook, FALSE);
+    gtk_notebook_set_current_page(notebook, 0);
+
+    // Some styling changes since Glade doesn't support setting it
+#if GTK_CHECK_VERSION(3,12,0)
+    GtkButtonBox *bbox = GTK_BUTTON_BOX (lookup_widget (w, "plugin_tabbtn_hbtnbox"));
+    gtk_button_box_set_layout (bbox, GTK_BUTTONBOX_EXPAND);
+#endif
 
     // hotkeys
     prefwin_init_hotkeys (prefwin);
 
     deadbeef->conf_unlock ();
-    for (;;) {
-        gtk_dialog_run (GTK_DIALOG (prefwin));
-        if (gtkui_hotkeys_changed) {
-            GtkWidget *dlg = gtk_message_dialog_new (GTK_WINDOW (prefwin), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, _("You modified the hotkeys settings, but didn't save your changes."));
-            gtk_window_set_transient_for (GTK_WINDOW (dlg), GTK_WINDOW (prefwin));
-            gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dlg), _("Are you sure you want to continue without saving?"));
-            gtk_window_set_title (GTK_WINDOW (dlg), _("Warning"));
-            int response = gtk_dialog_run (GTK_DIALOG (dlg));
-            gtk_widget_destroy (dlg);
-            if (response == GTK_RESPONSE_YES) {
-                break;
-            }
-        }
-        else {
-            break;
-        }
+
+    g_signal_connect (GTK_DIALOG (prefwin), "response", G_CALLBACK (on_prefwin_response_cb), NULL);
+
+    gtk_window_set_modal (GTK_WINDOW (prefwin), FALSE);
+    gtk_window_set_position (GTK_WINDOW (prefwin), GTK_WIN_POS_CENTER_ON_PARENT);
+    gtk_window_present (GTK_WINDOW (prefwin));
+}
+
+void
+on_only_show_plugins_with_configuration1_activate
+                                        (GtkMenuItem     *menuitem,
+                                        gpointer         user_data)
+{
+    GtkWidget *w = prefwin;
+    GtkTreeView *tree = GTK_TREE_VIEW (lookup_widget (w, "pref_pluginlist"));
+    int active = gtk_check_menu_item_get_active (GTK_CHECK_MENU_ITEM (menuitem));
+    if (active) {
+       gtk_tree_view_set_model (tree, GTK_TREE_MODEL (pluginliststore_filtered));
+    } else {
+       gtk_tree_view_set_model (tree, GTK_TREE_MODEL (pluginliststore));
     }
-    dsp_setup_free ();
-    gtk_widget_destroy (prefwin);
-    deadbeef->conf_save ();
-    prefwin = NULL;
+}
+
+gboolean
+on_pref_pluginlist_button_press_event  (GtkWidget       *widget,
+                                        GdkEventButton  *event,
+                                        gpointer         user_data)
+{
+    if (event->button == 3) {
+        gtk_menu_popup (GTK_MENU (pluginlistmenu), NULL, NULL, NULL, NULL, event->button, gtk_get_current_event_time());
+        return TRUE;
+    }
+
+    return FALSE;
 }
 
 void
@@ -638,6 +730,15 @@ on_mmb_delete_playlist_toggled         (GtkToggleButton *togglebutton,
 }
 
 void
+gtkui_conf_get_str (const char *key, char *value, int len, const char *def) {
+    deadbeef->conf_get_str (key, def, value, len);
+}
+
+void plugin_pref_prop_changed_cb(ddb_pluginprefs_dialog_t *make_dialog_conf) {
+    apply_conf (GTK_WIDGET (make_dialog_conf->containerbox), &make_dialog_conf->dialog_conf, 0);
+}
+
+void
 on_pref_pluginlist_cursor_changed      (GtkTreeView     *treeview,
                                         gpointer         user_data)
 {
@@ -648,10 +749,19 @@ on_pref_pluginlist_cursor_changed      (GtkTreeView     *treeview,
         // reset
         return;
     }
-    int *indices = gtk_tree_path_get_indices (path);
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    int idx;
+    model = gtk_tree_view_get_model (treeview);
+    if (!gtk_tree_model_get_iter (model, &iter, path)) {
+        return;
+    }
+
+    gtk_tree_model_get (model, &iter, PLUGIN_LIST_COL_IDX, &idx, -1);
+    
     DB_plugin_t **plugins = deadbeef->plug_get_list ();
-    DB_plugin_t *p = plugins[*indices];
-    g_free (indices);
+    DB_plugin_t *p = plugins[idx];
+    
     assert (p);
     GtkWidget *w = prefwin;
     assert (w);
@@ -680,47 +790,59 @@ on_pref_pluginlist_cursor_changed      (GtkTreeView     *treeview,
         gtk_widget_set_sensitive (link, FALSE);
     }
 
-    GtkWidget *cpr = lookup_widget (w, "plug_copyright");
+    GtkTextView *lictv = GTK_TEXT_VIEW (lookup_widget (w, "plug_license"));
     if (p->copyright) {
-        gtk_widget_set_sensitive (cpr, TRUE);
+        GtkTextBuffer *buffer = gtk_text_buffer_new (NULL);
+
+        gtk_text_buffer_set_text (buffer, p->copyright, strlen(p->copyright));
+        gtk_text_view_set_buffer (GTK_TEXT_VIEW (lictv), buffer);
+        g_object_unref (buffer);
     }
     else {
-        gtk_widget_set_sensitive (cpr, FALSE);
+        gtk_text_view_set_buffer(lictv, NULL);
     }
 
-    gtk_widget_set_sensitive (lookup_widget (prefwin, "configure_plugin"), p->configdialog ? TRUE : FALSE);
-}
+    GtkWidget *plugin_actions_btnbox = lookup_widget (w, "plugin_actions_btnbox");
 
-void
-gtkui_conf_get_str (const char *key, char *value, int len, const char *def) {
-    deadbeef->conf_get_str (key, def, value, len);
-}
+    GtkWidget *container = (lookup_widget (w, "plug_conf_dlg_viewport"));
+    GtkWidget *child = gtk_bin_get_child (GTK_BIN (container));
+    if (child)
+        gtk_widget_destroy(child);
 
-void
-on_configure_plugin_clicked            (GtkButton       *button,
-                                        gpointer         user_data)
-{
-    GtkWidget *w = prefwin;
-    GtkTreeView *treeview = GTK_TREE_VIEW (lookup_widget (w, "pref_pluginlist"));
-    GtkTreePath *path;
-    GtkTreeViewColumn *col;
-    gtk_tree_view_get_cursor (treeview, &path, &col);
-    if (!path || !col) {
-        // reset
-        return;
-    }
-    int *indices = gtk_tree_path_get_indices (path);
-    DB_plugin_t **plugins = deadbeef->plug_get_list ();
-    DB_plugin_t *p = plugins[*indices];
     if (p->configdialog) {
-        ddb_dialog_t conf = {
+         ddb_dialog_t conf = {
             .title = p->name,
             .layout = p->configdialog,
             .set_param = deadbeef->conf_set_str,
             .get_param = gtkui_conf_get_str,
         };
-        gtkui_run_dialog (prefwin, &conf, 0, NULL, NULL);
+        ddb_pluginprefs_dialog_t make_dialog_conf = {
+            .dialog_conf = conf,
+            .parent = prefwin,
+            .prop_changed = plugin_pref_prop_changed_cb,
+        };
+        GtkWidget *box = gtk_vbox_new(FALSE, 0);
+        gtk_widget_show (box);
+        if (user_data == 1) {
+            apply_conf (box, &conf, 1);
+        }
+        make_dialog_conf.containerbox = box;
+        gtk_container_add (GTK_CONTAINER (container), box);
+        gtkui_make_dialog (&make_dialog_conf);
+
+        gtk_widget_show (plugin_actions_btnbox);
+    } else {
+        gtk_widget_hide (plugin_actions_btnbox);
     }
+}
+
+void
+on_plugin_conf_reset_btn_clicked       (GtkButton       *button,
+                                        gpointer         user_data)
+{
+    GtkWidget *w = prefwin;
+    GtkTreeView *treeview = GTK_TREE_VIEW (lookup_widget (w, "pref_pluginlist"));
+    on_pref_pluginlist_cursor_changed(treeview, 1);
 }
 
 void
@@ -730,8 +852,67 @@ on_pref_pluginlist_row_activated       (GtkTreeView     *treeview,
                                         gpointer         user_data)
 {
     GtkWidget *w = prefwin;
-    GtkButton *btn = GTK_BUTTON (lookup_widget (w, "configure_plugin"));
-    gtk_button_clicked(btn);
+    GtkNotebook *notebook = GTK_NOTEBOOK (lookup_widget (w, "plugin_notebook"));
+    gtk_notebook_set_current_page (notebook, 0);
+}
+
+void
+on_plugin_conf_tab_btn_clicked         (GtkRadioButton       *button,
+                                        gpointer         user_data)
+{
+    GtkWidget *w = prefwin;
+    GtkNotebook *notebook = GTK_NOTEBOOK (lookup_widget (w, "plugin_notebook"));
+    gtk_notebook_set_current_page (notebook, 0);
+}
+
+
+void
+on_plugin_info_tab_btn_clicked         (GtkRadioButton       *button,
+                                        gpointer         user_data)
+{
+    GtkWidget *w = prefwin;
+    GtkNotebook *notebook = GTK_NOTEBOOK (lookup_widget (w, "plugin_notebook"));
+    gtk_notebook_set_current_page (notebook, 1);
+}
+
+
+void
+on_plugin_license_tab_btn_clicked      (GtkRadioButton       *button,
+                                        gpointer         user_data)
+{
+    GtkWidget *w = prefwin;
+    GtkNotebook *notebook = GTK_NOTEBOOK (lookup_widget (w, "plugin_notebook"));
+    gtk_notebook_set_current_page (notebook, 2);
+}
+
+//  This code is only here so you can programmatically switch page
+//  of the notebook and have the radio buttons update accordingly.
+void
+on_plugin_notebook_switch_page         (GtkNotebook     *notebook,
+                                        GtkWidget       *page,
+                                        guint            page_num,
+                                        gpointer         user_data)
+{
+    GtkWidget *w = prefwin;
+    GtkToggleButton *plugin_conf_tab_btn = GTK_TOGGLE_BUTTON (lookup_widget (w, "plugin_conf_tab_btn"));
+    GtkToggleButton *plugin_info_tab_btn = GTK_TOGGLE_BUTTON (lookup_widget (w, "plugin_info_tab_btn"));
+    GtkToggleButton *plugin_license_tab_btn = GTK_TOGGLE_BUTTON (lookup_widget (w, "plugin_license_tab_btn"));
+
+    GSignalMatchType mask = G_SIGNAL_MATCH_DETAIL | G_SIGNAL_MATCH_DATA;
+    GQuark detail = g_quark_from_static_string ("switch_page");
+    g_signal_handlers_block_matched ((gpointer)notebook, mask, detail, 0, NULL, NULL, NULL);
+
+    switch (page_num) {
+        case 0:
+        gtk_toggle_button_set_active (plugin_conf_tab_btn, 1);
+        break;
+        case 1:
+        gtk_toggle_button_set_active (plugin_info_tab_btn, 1);
+        break;
+        case 2:
+        gtk_toggle_button_set_active (plugin_license_tab_btn, 1);
+    }
+    g_signal_handlers_unblock_matched ((gpointer)notebook, mask, detail, 0, NULL, NULL, NULL);
 }
 
 static void

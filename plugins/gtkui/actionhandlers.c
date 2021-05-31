@@ -170,6 +170,15 @@ action_remove_current_playlist_handler (struct DB_plugin_action_s *action, ddb_a
     return 0;
 }
 
+int
+action_rename_current_playlist_handler (struct DB_plugin_action_s *action, ddb_action_context_t ctx) {
+    int idx = deadbeef->plt_get_curr_idx ();
+    if (idx != -1) {
+        gtkui_rename_playlist_at_index(idx);
+    }
+    return 0;
+}
+
 gboolean
 action_toggle_mainwin_handler_cb (void *user_data) {
     mainwin_toggle_visible ();

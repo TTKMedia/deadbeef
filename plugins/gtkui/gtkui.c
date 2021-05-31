@@ -575,6 +575,32 @@ gtkui_get_curr_playlist_mod (void) {
     return res;
 }
 
+int
+gtkui_rename_playlist_at_index (int plt_idx) {
+    GtkWidget *dlg = create_entrydialog ();
+    gtk_window_set_transient_for (GTK_WINDOW (dlg), GTK_WINDOW (mainwin));
+    gtk_dialog_set_default_response (GTK_DIALOG (dlg), GTK_RESPONSE_OK);
+    gtk_window_set_title (GTK_WINDOW (dlg), _("Rename Playlist"));
+    GtkWidget *e;
+    e = lookup_widget (dlg, "title_label");
+    gtk_label_set_text (GTK_LABEL(e), _("Title:"));
+    e = lookup_widget (dlg, "title");
+    char t[1000];
+    plt_get_title_wrapper (plt_idx, t, sizeof (t));
+    gtk_entry_set_text (GTK_ENTRY (e), t);
+    int res = gtk_dialog_run (GTK_DIALOG (dlg));
+    if (res == GTK_RESPONSE_OK) {
+        const char *text = gtk_entry_get_text (GTK_ENTRY (e));
+        deadbeef->pl_lock ();
+        ddb_playlist_t *p = deadbeef->plt_get_for_idx (plt_idx);
+        deadbeef->plt_set_title (p, text);
+        deadbeef->plt_unref (p);
+        deadbeef->pl_unlock ();
+    }
+    gtk_widget_destroy (dlg);
+    return 0;
+}
+
 void
 gtkui_setup_gui_refresh (void) {
     int tm = 1000/gtkui_get_gui_refresh_rate ();
@@ -1241,6 +1267,47 @@ logwindow_logger_callback (struct DB_plugin_s *plugin, uint32_t layers, const ch
     g_idle_add(logwindow_addtext_cb, (gpointer)data);
 }
 
+
+static gboolean
+gtkui_mainwin_drag_motion              (GtkWidget       *widget,
+                                        GdkDragContext  *drag_context,
+                                        gint             x,
+                                        gint             y,
+                                        guint            time,
+                                        gpointer         user_data)
+{
+    // Don't allow drag from within application
+    if (gtk_drag_get_source_widget (drag_context)) {
+        gdk_drag_status (drag_context, 0, time);
+    }
+
+    return FALSE;
+}
+
+static void
+gtkui_mainwin_drag_data_received       (GtkWidget       *widget,
+                                        GdkDragContext  *drag_context,
+                                        gint             x,
+                                        gint             y,
+                                        GtkSelectionData *data,
+                                        guint            target_type,
+                                        guint            time,
+                                        gpointer         user_data)
+{
+    gchar *ptr=(char*)gtk_selection_data_get_data (data);
+    gint len = gtk_selection_data_get_length (data);
+    if (target_type == TARGET_URILIST) { // uris
+        // this happens when dropped from file manager
+        char *mem = malloc (len+1);
+        memcpy (mem, ptr, len);
+        mem[len] = 0;
+        // we don't pass control structure, but there's only one drag-drop view currently
+        gtkui_receive_fm_drop (NULL, mem, len);
+    }
+
+    gtk_drag_finish (drag_context, TRUE, FALSE, time);
+}
+
 void
 gtkui_mainwin_init(void) {
     // register widget types
@@ -1308,6 +1375,16 @@ gtkui_mainwin_init(void) {
     }
 
     pl_common_init();
+
+    // setup drag-drop target
+    gtk_drag_dest_set (mainwin, GTK_DEST_DEFAULT_ALL, NULL, 0, GDK_ACTION_COPY);
+    gtk_drag_dest_add_uri_targets (mainwin);
+    g_signal_connect ((gpointer) mainwin, "drag_data_received",
+            G_CALLBACK (gtkui_mainwin_drag_data_received),
+            NULL);
+    g_signal_connect ((gpointer) mainwin, "drag_motion",
+            G_CALLBACK (gtkui_mainwin_drag_motion),
+            NULL);
 
     GtkIconTheme *theme = gtk_icon_theme_get_default();
     if (gtk_icon_theme_has_icon(theme, "deadbeef")) {
@@ -1896,12 +1973,20 @@ static DB_plugin_action_t action_new_playlist = {
     .next = &action_remove_current_playlist
 };
 
+static DB_plugin_action_t action_rename_current_playlist = {
+    .title = "File/Rename Current Playlist",
+    .name = "rename_current_playlist",
+    .flags = DB_ACTION_COMMON,
+    .callback2 = action_rename_current_playlist_handler,
+    .next = &action_new_playlist
+};
+
 static DB_plugin_action_t action_toggle_eq = {
     .title = "View/Show\\/Hide Equalizer",
     .name = "toggle_eq",
     .flags = DB_ACTION_COMMON,
     .callback2 = action_toggle_eq_handler,
-    .next = &action_new_playlist
+    .next = &action_rename_current_playlist
 };
 
 static DB_plugin_action_t action_hide_eq = {

@@ -94,6 +94,7 @@ const char *lowprio_plugin_ids[] = {
 // internal plugin list
 typedef struct plugin_s {
     void *handle;
+    char *filepath;
     DB_plugin_t *plugin;
     struct plugin_s *next;
 } plugin_t;
@@ -519,6 +520,8 @@ static DB_functions_t deadbeef_api = {
 
     .plt_get_head_item = (ddb_playItem_t * (*) (ddb_playlist_t *p, int iter))plt_get_head_item,
     .plt_get_tail_item = (ddb_playItem_t * (*) (ddb_playlist_t *p, int iter))plt_get_tail_item,
+
+    .plug_get_path_for_plugin_ptr = (const char* (*) (DB_plugin_t *plugin_ptr))plug_get_path_for_plugin_ptr,
 };
 
 DB_functions_t *deadbeef = &deadbeef_api;
@@ -827,6 +830,7 @@ load_plugin (const char *plugdir, char *d_name, int l) {
         dlclose (handle);
         return -1;
     }
+    plugins_tail->filepath = strdup (fullname);
     return 0;
 }
 
@@ -834,7 +838,7 @@ static int
 load_gui_plugin (const char **plugdirs) {
 #if defined HAVE_COCOAUI || defined HAVE_XGUI
     return 0;
-#endif
+#else
 
     char conf_gui_plug[100];
     conf_get_str ("gui_plugin", "GTK2", conf_gui_plug, sizeof (conf_gui_plug));
@@ -869,6 +873,7 @@ load_gui_plugin (const char **plugdirs) {
         }
     }
     return -1;
+#endif
 }
 
 static int
@@ -923,7 +928,7 @@ load_plugin_dir (const char *plugdir, int gui_scan) {
                     while (*e && *e > 0x20) {
                         e++;
                     }
-                    if (l-sizeof (PLUGINEXT)+1 == e-p) {
+                    if (l-sizeof (PLUGINEXT)+1 == (uintptr_t)(e-p)) {
                         if (!strncmp (p, d_name, e-p)) {
                             p = NULL;
                             break;
@@ -963,10 +968,10 @@ load_plugin_dir (const char *plugdir, int gui_scan) {
                             break;
                         }
                         // add to list of unique names
-                        size_t i;
-                        for (i = 0; g_gui_names[i] && strcmp(g_gui_names[i], nm); i++);
-                        if (!g_gui_names[i]) {
-                            g_gui_names[i] = strdup (nm);
+                        size_t idx;
+                        for (idx = 0; g_gui_names[idx] && strcmp(g_gui_names[idx], nm); idx++);
+                        if (!g_gui_names[idx]) {
+                            g_gui_names[idx] = strdup (nm);
                             g_gui_names[++g_num_gui_names] = NULL;
                             trace ("added %s gui plugin\n", nm);
                         }
@@ -1307,6 +1312,7 @@ plug_unload_all (void) {
         if (plugins->handle) {
             dlclose (plugins->handle);
         }
+        free (plugins->filepath);
         free (plugins);
         plugins = next;
     }
@@ -1466,10 +1472,10 @@ plug_get_decoder_for_id (const char *id) {
     if (!id) {
         return NULL;
     }
-    DB_decoder_t **plugins = plug_get_decoder_list ();
-    for (int c = 0; plugins[c]; c++) {
-        if (!strcmp (id, plugins[c]->plugin.id)) {
-            return plugins[c];
+    DB_decoder_t **decoder_plugins = plug_get_decoder_list ();
+    for (int c = 0; decoder_plugins[c]; c++) {
+        if (!strcmp (id, decoder_plugins[c]->plugin.id)) {
+            return decoder_plugins[c];
         }
     }
     return NULL;
@@ -1477,10 +1483,21 @@ plug_get_decoder_for_id (const char *id) {
 
 DB_plugin_t *
 plug_get_for_id (const char *id) {
-    DB_plugin_t **plugins = plug_get_list ();
-    for (int c = 0; plugins[c]; c++) {
-        if (plugins[c]->id && !strcmp (id, plugins[c]->id)) {
-            return plugins[c];
+    DB_plugin_t **all_plugins = plug_get_list ();
+    for (int c = 0; all_plugins[c]; c++) {
+        if (all_plugins[c]->id && !strcmp (id, all_plugins[c]->id)) {
+            return all_plugins[c];
+        }
+    }
+    return NULL;
+}
+
+const char *
+plug_get_path_for_plugin_ptr (DB_plugin_t *plugin_ptr) {
+    plugin_t *p;
+    for (p = plugins; p; p = p->next) {
+        if (p->plugin == plugin_ptr) {
+            return p->filepath;
         }
     }
     return NULL;

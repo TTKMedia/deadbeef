@@ -44,7 +44,6 @@
 static DB_decoder_t plugin;
 DB_functions_t *deadbeef;
 
-#define OUT_BUFFER_SIZE 1024*8*2 // AAC frame can be 1024 or 960 samples, up to 8 channels, 2 bytes each
 #define AAC_MAX_PACKET_SIZE 768*8 // setting max input packet size, to have some headroom
 
 #define MP4FILE mp4ff_t *
@@ -100,7 +99,8 @@ typedef struct {
     int remaining;
 
     // buffer with decoded samples
-    uint8_t out_buffer[OUT_BUFFER_SIZE];
+    uint8_t *out_buffer;
+    size_t out_buffer_size;
     int out_remaining;
     int num_errors;
     char *samplebuffer;
@@ -416,6 +416,7 @@ aac_free (DB_fileinfo_t *_info) {
         if (info->dec) {
             aacDecoderClose (info->dec);
         }
+        free (info->out_buffer);
         free (info);
     }
 }
@@ -597,7 +598,7 @@ aac_read (DB_fileinfo_t *_info, char *bytes, int size) {
             trace ("NeAACDecDecode %d bytes\n", info->remaining)
             samples = aacDecoderDecodeFrame (info->dec, &info->frame_info, info->buffer, info->remaining);
             bitrate_bytes += info->frame_info.bytesconsumed;
-            bitrate_samples += info->frame_info.samples / info->frame_info.channels;
+            bitrate_samples += info->frame_info.channels > 0 ? info->frame_info.samples / info->frame_info.channels : 0;
             trace ("samples =%p\n", samples);
             if (!samples) {
 //                trace ("NeAACDecDecode failed with error %s (%d), consumed=%d\n", NeAACDecGetErrorMessage(info->frame_info.error), (int)info->frame_info.error, (int)info->frame_info.bytesconsumed);
@@ -625,6 +626,10 @@ aac_read (DB_fileinfo_t *_info, char *bytes, int size) {
         }
 
         if (info->frame_info.samples > 0) {
+            if (info->out_buffer_size < info->frame_info.samples * 2) {
+                info->out_buffer_size = info->frame_info.samples * 2;
+                info->out_buffer = realloc (info->out_buffer, info->out_buffer_size);
+            }
             memcpy (info->out_buffer, samples, info->frame_info.samples * 2);
             info->out_remaining = (int)(info->frame_info.samples / info->frame_info.channels);
         }
@@ -900,8 +905,13 @@ _mp4_insert(DB_playItem_t **after, const char *fname, DB_FILE *fp, ddb_playlist_
             mp4p_atom_t *aac_atom = mp4p_atom_find (info.trak, "trak/mdia/minf/stbl/stsd/mp4a");
             if (aac_atom) {
                 aac = aac_atom->data;
-                info.aac_samplerate = aac->sample_rate;
-                break;
+                if (aac->sample_rate != 0) {
+                    info.aac_samplerate = aac->sample_rate;
+                    break;
+                }
+                else {
+                    aac = NULL;
+                }
             }
         }
         info.trak = info.trak->next;

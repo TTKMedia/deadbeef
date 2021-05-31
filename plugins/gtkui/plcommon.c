@@ -40,6 +40,7 @@
 #include "plcommon.h"
 #include "support.h"
 #include "trkproperties.h"
+#include "../../shared/tftintutil.h"
 
 #define min(x,y) ((x)<(y)?(x):(y))
 #define max(x,y) ((x)>(y)?(x):(y))
@@ -107,8 +108,8 @@ _capture_selected_track_list (void) {
 
     int count = deadbeef->plt_getselcount(plt);
     int all_idx = 0;
+    int idx = 0;
     if (count) {
-        int idx = 0;
         tracks = calloc (sizeof (ddb_playItem_t *), count);
 
         ddb_playItem_t *it = deadbeef->plt_get_first (plt, PL_MAIN);
@@ -129,6 +130,8 @@ _capture_selected_track_list (void) {
     }
 
 
+    deadbeef->pl_unlock ();
+
     _menuTrackList = ddbUtilTrackListInitWithWithTracks(ddbUtilTrackListAlloc(), plt, DDB_ACTION_CTX_SELECTION, tracks, count, current, current_idx);
 
     if (current) {
@@ -136,7 +139,11 @@ _capture_selected_track_list (void) {
         current = NULL;
     }
 
-    deadbeef->pl_unlock ();
+    for (int i = 0; i < idx; i++) {
+        deadbeef->pl_item_unref (tracks[i]);
+    }
+
+    free (tracks);
 
     deadbeef->plt_unref (plt);
 }
@@ -462,44 +469,51 @@ pl_common_draw_album_art (DdbListview *listview, cairo_t *cr, DB_playItem_t *it,
 
 
 PangoAttrList *
-convert_escapetext_to_pango_attrlist (char *text, float *fg, float *bg, float *highlight) {
+convert_escapetext_to_pango_attrlist (char *text, char **plainString, float *fg, float *bg, float *highlight) {
+    const int maxTintStops = 100;
+    tint_stop_t tintStops[maxTintStops];
+    int numTintStops;
+
+    numTintStops = calculate_tint_stops_from_string (text, tintStops, maxTintStops, plainString);
+
+    guint strLength = strlen(*plainString);
+
     PangoAttrList *lst = pango_attr_list_new ();
-    char *pin = text;
-    int x,y,a=0;
     PangoAttribute *attr = NULL;
-    int index=0;
-    while (*pin) {
-        int pos=0;
-        if ( sscanf(pin, "\033%d;%dm%n", &x, &y, &pos) == 2 && x == DDB_TF_ESC_DIM) {
 
-            memmove(pin, pin+pos, strlen(pin+pos)+1);
-            a += y;
+    // add attributes
+    for (guint i = 0; i < numTintStops; i++) {
+        int index0 = tintStops[i].byteindex;
+        guint len = strLength - index0;
 
-            if (attr && a == 0) {
-                attr->end_index = index+1;
-                pango_attr_list_insert (lst, attr);
-            } else if (a != 0 && y >= 1 && y <= 3) {
-                const float blend[] = {.50f, .25f, 0};
-                int r = CHANNEL_BLENDR(highlight[0], fg[0], blend[y-1]) * 65535;
-                int g = CHANNEL_BLENDR(highlight[1], fg[1], blend[y-1]) * 65535;
-                int b = CHANNEL_BLENDR(highlight[2], fg[2], blend[y-1]) * 65535;
-
-                attr = pango_attr_foreground_new (r, g, b);
-                attr->start_index = index;
-            } else if (a != 0 && y >= -3 && y <= -1) {
-                const float blend[] = {.30f, .60f, .80f};
-                int r = CHANNEL_BLENDR(fg[0], bg[0], blend[-y-1]) * 65535;
-                int g = CHANNEL_BLENDR(fg[1], bg[1], blend[-y-1]) * 65535;
-                int b = CHANNEL_BLENDR(fg[2], bg[2], blend[-y-1]) * 65535;
-
-                attr = pango_attr_foreground_new (r, g, b);
-                attr->start_index = index;
-            }
-        } else {
-            pin++;
-            index++;
+        GdkColor finalColor = { .red = fg[0]*65535, .green = fg[1]*65535, .blue = fg[2]*65535};
+        if (tintStops[i].has_rgb) {
+            finalColor.red = tintStops[i].r * 65535/255.;
+            finalColor.green = tintStops[i].g * 65535/255.;
+            finalColor.blue = tintStops[i].b * 65535/255.;
         }
+
+        int tint = tintStops[i].tint;
+
+        if (tint >= 1 && tint <= 3) {
+            const float blend[] = {.50f, .25f, 0};
+            finalColor.red   = CHANNEL_BLENDR(highlight[0], finalColor.red/65535., blend[tint-1]) * 65535;
+            finalColor.green = CHANNEL_BLENDR(highlight[1], finalColor.green/65535., blend[tint-1]) * 65535;
+            finalColor.blue  = CHANNEL_BLENDR(highlight[2], finalColor.blue/65535., blend[tint-1]) * 65535;
+
+        } else if (tint >= -3 && tint <= -1) {
+            const float blend[] = {.30f, .60f, .80f};
+            finalColor.red   = CHANNEL_BLENDR(finalColor.red/65535., bg[0], blend[-tint-1]) * 65535;
+            finalColor.green = CHANNEL_BLENDR(finalColor.green/65535., bg[1], blend[-tint-1]) * 65535;
+            finalColor.blue  = CHANNEL_BLENDR(finalColor.blue/65535., bg[2], blend[-tint-1]) * 65535;
+        }
+
+        attr = pango_attr_foreground_new (finalColor.red, finalColor.green, finalColor.blue);
+        attr->start_index = index0;
+        attr->end_index = index0 + len;
+        pango_attr_list_insert (lst, attr);
     }
+
     return lst;
 }
 
@@ -553,8 +567,11 @@ pl_common_draw_column_data (DdbListview *listview, cairo_t *cr, DdbListviewIter 
                 .iter = iter,
                 .id = info->id,
                 .idx = idx,
-                .flags = DDB_TF_CONTEXT_HAS_ID | DDB_TF_CONTEXT_HAS_INDEX | DDB_TF_CONTEXT_TEXT_DIM,
+                .flags = DDB_TF_CONTEXT_HAS_ID | DDB_TF_CONTEXT_HAS_INDEX,
             };
+            if (!deadbeef->pl_is_selected (it)) {
+                ctx.flags |= DDB_TF_CONTEXT_TEXT_DIM;
+            }
             deadbeef->tf_eval (&ctx, info->bytecode, text, sizeof (text));
             is_dimmed = ctx.dimmed;
             if (ctx.update > 0) {
@@ -670,10 +687,12 @@ pl_common_draw_column_data (DdbListview *listview, cairo_t *cr, DdbListviewIter 
         float bg[] = {background_color->red/65535., background_color->green/65535., background_color->blue/65535.};
 
         if (is_dimmed) {
-            PangoAttrList *attrs = convert_escapetext_to_pango_attrlist(text, fg, bg, highlight);
+            char *plainString;
+            PangoAttrList *attrs = convert_escapetext_to_pango_attrlist(text, &plainString, fg, bg, highlight);
             pango_layout_set_attributes (listview->listctx.pangolayout, attrs);
             pango_attr_list_unref(attrs);
-            draw_text_custom (&listview->listctx, x + 5, y + 3, width-10, align, DDB_LIST_FONT, bold, italic, text);
+            draw_text_custom (&listview->listctx, x + 5, y + 3, width-10, align, DDB_LIST_FONT, bold, italic, plainString);
+            free (plainString);
             pango_layout_set_attributes (listview->listctx.pangolayout, NULL);
         } else {
             draw_text_custom (&listview->listctx, x + 5, y + 3, width-10, align, DDB_LIST_FONT, bold, italic, text);
@@ -714,7 +733,7 @@ get_context_menu_column (GtkMenuItem *menuitem) {
 }
 
 static void
-add_to_playback_queue_activate     (GtkMenuItem     *menuitem,
+play_later_activate     (GtkMenuItem     *menuitem,
                                         gpointer         user_data)
 {
     DdbListview *listview = get_context_menu_listview (menuitem);
@@ -726,6 +745,22 @@ add_to_playback_queue_activate     (GtkMenuItem     *menuitem,
         DB_playItem_t *next = listview->binding->next (it);
         deadbeef->pl_item_unref (it);
         it = next;
+    }
+}
+
+static void
+play_next_activate     (GtkMenuItem     *menuitem,
+                                        gpointer         user_data)
+{
+    DdbListview *listview = get_context_menu_listview (menuitem);
+    DB_playItem_t *it = listview->binding->tail ();
+    while (it) {
+        if (deadbeef->pl_is_selected (it)) {
+            deadbeef->playqueue_insert_at (0, it);
+        }
+        DB_playItem_t *prev = listview->binding->prev (it);
+        deadbeef->pl_item_unref (it);
+        it = prev;
     }
 }
 
@@ -989,7 +1024,8 @@ list_context_menu (DdbListview *listview, DdbListviewIter it, int idx, int iter)
 
     clicked_idx = deadbeef->pl_get_idx_of (it);
     GtkWidget *playlist_menu;
-    GtkWidget *add_to_playback_queue1;
+    GtkWidget *play_later;
+    GtkWidget *play_next;
     GtkWidget *remove_from_playback_queue1;
     GtkWidget *separator;
     GtkWidget *remove2;
@@ -1015,11 +1051,15 @@ list_context_menu (DdbListview *listview, DdbListviewIter it, int idx, int iter)
     playlist_menu = gtk_menu_new ();
     g_object_set_data (G_OBJECT (playlist_menu), "ps", listview);
 
-    add_to_playback_queue1 = gtk_menu_item_new_with_mnemonic (_("Add To Playback Queue"));
-    gtk_widget_show (add_to_playback_queue1);
-    gtk_container_add (GTK_CONTAINER (playlist_menu), add_to_playback_queue1);
+    play_next = gtk_menu_item_new_with_mnemonic (_("Play Next"));
+    gtk_widget_show (play_next);
+    gtk_container_add (GTK_CONTAINER (playlist_menu), play_next);
 
-    remove_from_playback_queue1 = gtk_menu_item_new_with_mnemonic (_("Remove From Playback Queue"));
+    play_later = gtk_menu_item_new_with_mnemonic (_("Play Later"));
+    gtk_widget_show (play_later);
+    gtk_container_add (GTK_CONTAINER (playlist_menu), play_later);
+    
+    remove_from_playback_queue1 = gtk_menu_item_new_with_mnemonic (_("Remove from Playback Queue"));
     if (listview->binding->sel_count () > 1) {
         ddb_playlist_t *plt = deadbeef->plt_get_curr ();
         int pqlen = deadbeef->playqueue_get_count ();
@@ -1104,7 +1144,7 @@ list_context_menu (DdbListview *listview, DdbListviewIter it, int idx, int iter)
     int hide_remove_from_disk = deadbeef->conf_get_int ("gtkui.hide_remove_from_disk", 0);
 
     if (!hide_remove_from_disk) {
-        remove_from_disk = gtk_menu_item_new_with_mnemonic (_("Remove From Disk"));
+        remove_from_disk = gtk_menu_item_new_with_mnemonic (_("Remove from Disk"));
         gtk_widget_show (remove_from_disk);
         gtk_container_add (GTK_CONTAINER (playlist_menu), remove_from_disk);
     }
@@ -1257,8 +1297,11 @@ list_context_menu (DdbListview *listview, DdbListviewIter it, int idx, int iter)
     gtk_widget_show (properties1);
     gtk_container_add (GTK_CONTAINER (playlist_menu), properties1);
 
-    g_signal_connect ((gpointer) add_to_playback_queue1, "activate",
-            G_CALLBACK (add_to_playback_queue_activate),
+    g_signal_connect ((gpointer) play_later, "activate",
+            G_CALLBACK (play_later_activate),
+            NULL);
+    g_signal_connect ((gpointer) play_next, "activate",
+            G_CALLBACK (play_next_activate),
             NULL);
     g_signal_connect ((gpointer) remove_from_playback_queue1, "activate",
             G_CALLBACK (remove_from_playback_queue_activate),
@@ -2057,12 +2100,13 @@ pl_common_draw_group_title (DdbListview *listview, cairo_t *drawable, DdbListvie
         while (group_depth--) {
             fmt = fmt->next;
         }
+        int isdimmed=0;
         if (fmt->bytecode) {
             ddb_tf_context_t ctx = {
                 ._size = sizeof (ddb_tf_context_t),
                 .it = it,
                 .plt = deadbeef->plt_get_curr (),
-                .flags = DDB_TF_CONTEXT_NO_DYNAMIC,
+                .flags = DDB_TF_CONTEXT_NO_DYNAMIC | DDB_TF_CONTEXT_TEXT_DIM,
                 .iter = iter,
             };
             deadbeef->tf_eval (&ctx, fmt->bytecode, str, sizeof (str));
@@ -2070,6 +2114,7 @@ pl_common_draw_group_title (DdbListview *listview, cairo_t *drawable, DdbListvie
                 deadbeef->plt_unref (ctx.plt);
                 ctx.plt = NULL;
             }
+            isdimmed = ctx.dimmed;
 
 
             char *lb = strchr (str, '\r');
@@ -2083,21 +2128,54 @@ pl_common_draw_group_title (DdbListview *listview, cairo_t *drawable, DdbListvie
         }
 
         int theming = !gtkui_override_listview_colors ();
+        GdkColor clr;
         if (theming) {
-            GdkColor *clr = &gtk_widget_get_style(theme_treeview)->fg[GTK_STATE_NORMAL];
-            float rgb[] = {clr->red/65535., clr->green/65535., clr->blue/65535.};
-            draw_set_fg_color (&listview->grpctx, rgb);
+            clr = gtk_widget_get_style(theme_treeview)->fg[GTK_STATE_NORMAL];
         }
         else {
-            GdkColor clr;
             gtkui_get_listview_group_text_color (&clr);
-            float rgb[] = {clr.red/65535., clr.green/65535., clr.blue/65535.};
-            draw_set_fg_color (&listview->grpctx, rgb);
         }
+        float rgb[] = {clr.red/65535., clr.green/65535., clr.blue/65535.};
+        draw_set_fg_color (&listview->grpctx, rgb);
+
         int ew;
         int text_width = width-x-10;
         if (text_width > 0) {
-            draw_text_custom (&listview->grpctx, x + 5, y + height/2 - draw_get_listview_rowheight (&listview->grpctx)/2 + 3, text_width, 0, DDB_GROUP_FONT, 0, 0, str);
+            if (isdimmed) {
+                GdkColor *highlight_color;
+                GdkColor hlclr;
+                if (!gtkui_override_listview_colors ()) {
+                    highlight_color = &gtk_widget_get_style(theme_treeview)->fg[GTK_STATE_NORMAL];
+                }
+                else {
+                    highlight_color = (gtkui_get_listview_group_text_color (&hlclr), &hlclr);
+                }
+
+                float highlight[] = {highlight_color->red/65535., highlight_color->green/65535., highlight_color->blue/65535.};
+
+                GdkColor *background_color;
+                GdkColor bgclr;
+
+                if (!gtkui_override_listview_colors ()) {
+                    background_color = &gtk_widget_get_style(theme_treeview)->bg[GTK_STATE_NORMAL];
+                } else {
+                    gtkui_get_listview_odd_row_color (&bgclr);
+                    background_color = &bgclr;
+                }
+                float bg[] = {background_color->red/65535., background_color->green/65535., background_color->blue/65535.};
+
+                PangoAttrList *attrs;
+                char *plainString;
+
+                attrs = convert_escapetext_to_pango_attrlist(str, &plainString, rgb, bg, highlight);
+                pango_layout_set_attributes (listview->grpctx.pangolayout, attrs);
+                pango_attr_list_unref(attrs);
+                draw_text_custom (&listview->grpctx, x + 5, y + height/2 - draw_get_listview_rowheight (&listview->grpctx)/2 + 3, text_width, 0, DDB_GROUP_FONT, 0, 0, plainString);
+                free (plainString);
+                pango_layout_set_attributes (listview->grpctx.pangolayout, NULL);
+            } else {
+                draw_text_custom (&listview->grpctx, x + 5, y + height/2 - draw_get_listview_rowheight (&listview->grpctx)/2 + 3, text_width, 0, DDB_GROUP_FONT, 0, 0, str);
+            }
             draw_get_layout_extents (&listview->grpctx, &ew, NULL);
 
             int len = strlen (str);

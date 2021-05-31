@@ -872,6 +872,136 @@ scale_file (const char *in, const char *out, int img_size)
 #endif
 }
 
+static int
+is_illegal_windows_char(char c) {
+    // Forbidden characters in a windows file name: <>:"/\|?* and codepoints with value < 32
+    // https://docs.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions
+    static const char bad_chars[] = { '<', '>', ':', '"', '/', '\\', '|', '?', '*' };
+    for (int i = 0; i < sizeof(bad_chars); i++) {
+        if(c == bad_chars[i]) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int
+is_illegal_windows_name (const char* str) {
+    // A file can't be named these regardless of case.
+    // "CON", "PRN", "AUX", "NUL",
+    // "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    // "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+
+    // Also if a dot follows right after any of these it's forbidden as well
+    // since windows treats that as a file extension.
+    static const uint32_t com = ('C' << 16) | ('O' << 8) | 'M';
+    static const uint32_t lpt = ('L' << 16) | ('P' << 8) | 'T';
+    static const uint32_t names[] = {
+        ('A' << 16) | ('U' << 8) | 'X',
+        ('C' << 16) | ('O' << 8) | 'N',
+        ('N' << 16) | ('U' << 8) | 'L',
+        ('P' << 16) | ('R' << 8) | 'N'
+    };
+    uint32_t val = 0;
+    for (int i = 0; i < 3; i++) {
+        char tmp = str[i];
+        if(str[i] == '\0') {
+            return 0;
+        }
+        val <<= 8;
+        val  |= tmp;
+    }
+    val &= 0xdfdfdf; // Make case insensitive.
+    if (str[3] >= '0' && str[3] <= '9' && (val == com || val == lpt) && (str[4] == '\0' || str[4] == '.')) {
+        return 1;
+    }
+    if (str[3] == '\0' || str[3] == '.') {
+        for (int i = 0; i < 4; i++) {
+            if(val == names[i]) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+// Maybe put this in utils if useful in other places?
+static size_t
+sanitize_name_for_file_system (const char* name, char* clean, size_t clean_capacity) {
+    if(clean_capacity < 1) {
+        return 0;
+    }
+    // Trim leading white spaces
+    while (isspace (*name)) {
+        name++;
+    }
+
+    // Most Unix OSes only care about `/`, and `NULL`, but Mac OS does not like `:`
+    // https://en.wikipedia.org/wiki/Filename#Comparison_of_filename_limitations
+    size_t length = 0;
+    const char* name_end = name;
+    // An other possibility is escape to hex, but the old esc_char function just used `_`
+    while (*name_end != '\0' && (length + 1) < clean_capacity) {
+        unsigned char c = *name_end;
+        if (isspace (c)) {
+            c = ' ';
+        }
+        if (c == '/') {
+            c = '\\';
+        }
+        if (c == ':') {
+            c = '_';
+        }
+        // While only a restriction on windows these seem like a bad idea in general
+        if (c < 32) {
+            c = '_';
+        }
+        #ifdef __MINGW32__
+        if (is_illegal_windows_char (c)) {
+            c = '_';
+        }
+        #endif
+
+        clean[length] = c;
+        length++;
+        name_end++;
+    }
+    clean[length] = '\0';
+    //  Just an empty string nothing more process.
+    if(length < 1) {
+        return 0;
+    }
+
+    // A leading dash can make interacting with a file from the commandline a pain
+    if(clean[0] == '-') {
+        clean[0] = '_';
+    }
+
+    // Adjust length to trim trailing spaces, again a windows only thing, but spaces at the end
+    // and begining of strings can be a pain to work with from a commandline.
+    while (length > 0 && isspace (*(clean + length - 1))) {
+        length--;
+    }
+
+    #ifdef __MINGW32__
+    // prepend an underscore to the name
+    if (is_illegal_windows_name (clean)) {
+        if(length + 1 >= clean_capacity) {
+            length--; // truncate by one then
+        }
+        memmove (clean + 1, clean, length);
+        length++;
+        clean[0] = '_';
+        clean[length] = '\0';
+    }
+    // File names can't end with a period `.` on windows
+    if(clean[length - 1] == '.') {
+        clean[length - 1] = '_';
+    }
+    #endif
+    return length;
+}
+
 // esc_char is needed to prevent using file path separators,
 // e.g. to avoid writing arbitrary files using "../../../filename"
 static char
@@ -890,17 +1020,9 @@ esc_char (char c) {
 
 static int
 make_cache_dir_path (char *path, int size, const char *artist, int img_size) {
-    char esc_artist[NAME_MAX+1];
+    char esc_artist[NAME_MAX] = "Unknown artist";
     if (artist) {
-        size_t i = 0;
-        while (artist[i] && i < NAME_MAX) {
-            esc_artist[i] = esc_char (artist[i]);
-            i++;
-        }
-        esc_artist[i] = '\0';
-    }
-    else {
-        strcpy (esc_artist, "Unknown artist");
+        sanitize_name_for_file_system(artist, esc_artist, NAME_MAX);
     }
 
     if (make_cache_root_path (path, size) < 0) {
@@ -942,29 +1064,37 @@ make_cache_path2 (char *path, int size, const char *fname, const char *album, co
     if (!artist || !*artist) {
         artist = "Unknown artist";
     }
+    // If buffer larger than max path size limit it to NAME_MAX
+    if(size > NAME_MAX) {
+        size = NAME_MAX;
+    }
 
-    #ifdef __MINGW32__
+    if(size < sizeof ("1.jpg.part")) {
+        trace ("Artwork File Cache: Path buffer way too small!\n");
+        return -1;
+    }
+    // Temp file extension or something just make sure there is room for it
+    size -= sizeof ("1.jpg.part");
+
+
     if (make_cache_dir_path (path, size, artist, img_size)) {
         return -1;
     }
-    #else
-    if (make_cache_dir_path (path, size-NAME_MAX, artist, img_size)) {
-        return -1;
-    }
-    #endif
 
-    int max_album_chars = min (NAME_MAX, size - strlen (path)) - sizeof ("1.jpg.part");
-    if (max_album_chars <= 0) {
+    size -= strlen (path);
+    size -= 4; // File extension .jpg
+    if (size < 1) {
         trace ("Path buffer not long enough for %s and filename\n", path);
         return -1;
     }
 
-    char esc_album[max_album_chars+1];
-    const char *palbum = strlen (album) > max_album_chars ? album+strlen (album)-max_album_chars : album;
-    size_t i = 0;
-    do {
-        esc_album[i] = esc_char (palbum[i]);
-    } while (palbum[i++]);
+    char esc_album[size+1];
+    size_t len = sanitize_name_for_file_system (album, esc_album, size + 1);
+    if (len < 1) {
+        // Would only happen if the name was entirely spaces or something like that.
+        trace ("Artwork File Cache: Not possible to get any unique album name.\n");
+        return -1;
+    }
 
     sprintf (path+strlen (path), "%s%s", esc_album, ".jpg");
     return 0;

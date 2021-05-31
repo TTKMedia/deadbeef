@@ -1419,3 +1419,41 @@ on_minimize_on_startup_clicked         (GtkButton       *button,
 void
 on_move_to_trash_clicked               (GtkButton       *button,
                                         gpointer         user_data);
+
+void
+on_plugin_conf_tab_btn_clicked         (GtkRadioButton       *button,
+                                        gpointer         user_data);
+
+void
+on_plugin_info_tab_btn_clicked         (GtkRadioButton       *button,
+                                        gpointer         user_data);
+
+void
+on_plugin_license_tab_btn_clicked      (GtkRadioButton       *button,
+                                        gpointer         user_data);
+
+
+void
+on_plugin_notebook_switch_page         (GtkNotebook     *notebook,
+                                        GtkWidget       *page,
+                                        guint            page_num,
+                                        gpointer         user_data);
+
+void
+on_plugin_conf_reset_btn_clicked       (GtkButton       *button,
+                                        gpointer         user_data);
+
+void
+on_copy_plugin_report_menuitem_activate
+                                        (GtkMenuItem     *menuitem,
+                                        gpointer         user_data);
+
+gboolean
+on_pref_pluginlist_button_press_event  (GtkWidget       *widget,
+                                        GdkEventButton  *event,
+                                        gpointer         user_data);
+
+void
+on_only_show_plugins_with_configuration1_activate
+                                        (GtkMenuItem     *menuitem,
+                                        gpointer         user_data);

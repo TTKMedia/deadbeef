@@ -58,43 +58,32 @@ static void
 on_rename_playlist1_activate           (GtkMenuItem     *menuitem,
                                         gpointer         user_data)
 {
-    GtkWidget *dlg = create_entrydialog ();
-    gtk_dialog_set_default_response (GTK_DIALOG (dlg), GTK_RESPONSE_OK);
-    gtk_window_set_title (GTK_WINDOW (dlg), _("Rename Playlist"));
-    GtkWidget *e;
-    e = lookup_widget (dlg, "title_label");
-    gtk_label_set_text (GTK_LABEL(e), _("Title:"));
-    e = lookup_widget (dlg, "title");
-    char t[1000];
-    plt_get_title_wrapper (pltmenu_idx, t, sizeof (t));
-    gtk_entry_set_text (GTK_ENTRY (e), t);
-    int res = gtk_dialog_run (GTK_DIALOG (dlg));
-    if (res == GTK_RESPONSE_OK) {
-        const char *text = gtk_entry_get_text (GTK_ENTRY (e));
-        deadbeef->pl_lock ();
-        ddb_playlist_t *p = deadbeef->plt_get_for_idx (pltmenu_idx);
-        deadbeef->plt_set_title (p, text);
-        deadbeef->plt_unref (p);
-        deadbeef->pl_unlock ();
+    if (pltmenu_idx != -1) {
+        gtkui_rename_playlist_at_index(pltmenu_idx);
     }
-    gtk_widget_destroy (dlg);
 }
 
 static void
 on_remove_playlist1_activate           (GtkMenuItem     *menuitem,
                                         gpointer         user_data)
 {
+
     if (pltmenu_idx != -1) {
         char title[500];
-        plt_get_title_wrapper (pltmenu_idx, title, sizeof (title));
-        GtkWidget *dlg = gtk_message_dialog_new (GTK_WINDOW (mainwin), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, _("Removing playlist"));
-        gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dlg), _("Do you really want to remove the playlist '%s'?"), title);
-        gtk_window_set_title (GTK_WINDOW (dlg), _("Warning"));
-        int response = gtk_dialog_run (GTK_DIALOG (dlg));
-        gtk_widget_destroy (dlg);
-        if (response != GTK_RESPONSE_YES) {
-            return;
+        ddb_playlist_t *plt = deadbeef->plt_get_for_idx(pltmenu_idx);
+        if (deadbeef->plt_get_first(plt, PL_MAIN) != NULL) {
+            // playlist not empty, confirm first.
+            plt_get_title_wrapper (pltmenu_idx, title, sizeof (title));
+            GtkWidget *dlg = gtk_message_dialog_new (GTK_WINDOW (mainwin), GTK_DIALOG_MODAL, GTK_MESSAGE_WARNING, GTK_BUTTONS_YES_NO, _("Removing playlist"));
+            gtk_message_dialog_format_secondary_text (GTK_MESSAGE_DIALOG (dlg), _("Do you really want to remove the playlist '%s'?"), title);
+            gtk_window_set_title (GTK_WINDOW (dlg), _("Warning"));
+            int response = gtk_dialog_run (GTK_DIALOG (dlg));
+            gtk_widget_destroy (dlg);
+            if (response != GTK_RESPONSE_YES) {
+                return;
+            }
         }
+
         deadbeef->plt_remove (pltmenu_idx);
         int playlist = deadbeef->plt_get_curr_idx ();
         deadbeef->conf_set_int ("playlist.current", playlist);

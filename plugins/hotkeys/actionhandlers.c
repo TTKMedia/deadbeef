@@ -721,6 +721,24 @@ action_add_to_playqueue_handler (DB_plugin_action_t *act, ddb_action_context_t c
 }
 
 int
+action_prepend_to_playqueue_handler (DB_plugin_action_t *act, ddb_action_context_t ctx) {
+    ddb_playlist_t *plt = deadbeef->action_get_playlist ();
+
+    DB_playItem_t *it = deadbeef->plt_get_last (plt, PL_MAIN);
+    while (it) {
+        if (ctx == DDB_ACTION_CTX_PLAYLIST || (ctx == DDB_ACTION_CTX_SELECTION && deadbeef->pl_is_selected (it))) {
+            deadbeef->playqueue_insert_at (0, it);
+        }
+        DB_playItem_t *prev = deadbeef->pl_get_prev (it, PL_MAIN);
+        deadbeef->pl_item_unref (it);
+        it = prev;
+    }
+
+    deadbeef->plt_unref (plt);
+    return 0;
+}
+
+int
 action_remove_from_playqueue_handler (DB_plugin_action_t *act, ddb_action_context_t ctx) {
     ddb_playlist_t *plt = deadbeef->action_get_playlist ();
 
@@ -742,5 +760,23 @@ int
 action_toggle_mute_handler (DB_plugin_action_t *act, ddb_action_context_t ctx) {
     int mute = 1-deadbeef->audio_is_mute ();
     deadbeef->audio_set_mute (mute);
+    return 0;
+}
+
+int
+action_prev_or_restart_cb (struct DB_plugin_action_s *action, ddb_action_context_t ctx) {
+    DB_playItem_t *it = deadbeef->streamer_get_playing_track ();
+    if (it) {
+        float dur = deadbeef->pl_get_item_duration (it);
+        deadbeef->pl_item_unref (it);
+        if (dur > 0) {
+            float pos = deadbeef->streamer_get_playpos ();
+            if (pos > 3) {
+                deadbeef->sendmessage (DB_EV_SEEK, 0, 0, 0);
+                return 0;
+            }
+        }
+    }
+    deadbeef->sendmessage (DB_EV_PREV, 0, 0, 0);
     return 0;
 }

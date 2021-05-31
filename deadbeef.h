@@ -98,7 +98,7 @@ extern "C" {
 // 0.1 -- deadbeef-0.2.0
 
 #define DB_API_VERSION_MAJOR 1
-#define DB_API_VERSION_MINOR 13
+#define DB_API_VERSION_MINOR 14
 
 #if defined(__clang__)
 
@@ -684,6 +684,7 @@ enum {
 #if (DDB_API_LEVEL >= 10)
 enum {
     DDB_TF_ESC_DIM = 1,
+    DDB_TF_ESC_RGB = 2,
 };
 #endif
 
@@ -1573,6 +1574,11 @@ typedef struct {
     ddb_playItem_t * (*plt_get_head_item) (ddb_playlist_t *p, int iter);
     ddb_playItem_t * (*plt_get_tail_item) (ddb_playlist_t *p, int iter);
 #endif
+
+// since 1.14
+#if (DDB_API_LEVEL >= 14)
+    const char* (*plug_get_path_for_plugin_ptr) (struct DB_plugin_s *plugin_ptr);
+#endif
 } DB_functions_t;
 
 // NOTE: an item placement must be selected like this
@@ -2053,6 +2059,10 @@ typedef struct DB_playlist_s {
 
     // since 1.5
 #if (DDB_API_LEVEL >= 5)
+    // NOTE: load2 is not used by any existing plugins, and its purpose it lost in history.
+    // Supposedly, it was added to support plugins which could implement cuesheet loading
+    // as a playlist format, which didn't work out.
+    // Generally, it's not recommended to use this, as the behavior is undefined.
     DB_playItem_t * (*load2) (int visibility, ddb_playlist_t *plt, DB_playItem_t *after, const char *fname, int *pabort);
 #endif
 } DB_playlist_t;

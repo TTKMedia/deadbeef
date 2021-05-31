@@ -159,8 +159,8 @@ extern DB_functions_t *deadbeef;
 }
 
 - (void)menuTogglePinGroups:(NSButton *)sender {
-    self.pinGroups = sender.state == NSOnState ? 0 : 1;
-    sender.state = self.pinGroups?NSOnState:NSOffState;
+    self.pinGroups = sender.state == NSControlStateValueOn ? 0 : 1;
+    sender.state = self.pinGroups?NSControlStateValueOn:NSControlStateValueOff;
     deadbeef->conf_set_int ([self pinGroupsConfStr], self.pinGroups);
     PlaylistView *lv = (PlaylistView *)self.view;
     [lv.contentView updatePinnedGroup];
@@ -297,7 +297,7 @@ extern DB_functions_t *deadbeef;
               withId:(int)type
             withSize:self.columns[idx].size
           withFormat:self.editColumnWindowController.formatTextField.stringValue.UTF8String
-       withAlignment:(int)self.editColumnWindowController.alignmentPopUpButton.indexOfSelectedItem withSetColor:(self.editColumnWindowController.setColorButton.state == NSOnState)
+       withAlignment:(int)self.editColumnWindowController.alignmentPopUpButton.indexOfSelectedItem withSetColor:(self.editColumnWindowController.setColorButton.state == NSControlStateValueOn)
            withColor:rgba];
     [self columnsChanged];
 }
@@ -473,7 +473,7 @@ extern DB_functions_t *deadbeef;
         [menu insertItemWithTitle:@"Edit Column" action:@selector(menuEditColumn:) keyEquivalent:@"" atIndex:1].target = self;
         [menu insertItemWithTitle:@"Remove Column" action:@selector(menuRemoveColumn:) keyEquivalent:@"" atIndex:2].target = self;
         NSMenuItem *item = [menu insertItemWithTitle:@"Pin Groups When Scrolling" action:@selector(menuTogglePinGroups:) keyEquivalent:@"" atIndex:3];
-        item.state = self.pinGroups?NSOnState:NSOffState;
+        item.state = self.pinGroups?NSControlStateValueOn:NSControlStateValueOff;
         item.target = self;
 
         [menu insertItem:[NSMenuItem separatorItem] atIndex:4];
@@ -678,30 +678,43 @@ extern DB_functions_t *deadbeef;
 }
 
 - (NSMutableAttributedString *)stringWithTintAttributesFromString:(const char *)inputString initialAttributes:(NSDictionary *)attributes foregroundColor:(NSColor *)foregroundColor backgroundColor:(NSColor *)backgroundColor {
-    const int maxTintRanges = 100;
-    int tintRanges[maxTintRanges];
-    NSUInteger numTintRanges;
+    const int maxTintStops = 100;
+    tint_stop_t tintStops[maxTintStops];
+    NSUInteger numTintStops;
     char * plainString;
 
-    numTintRanges = calculate_tint_ranges_from_string (inputString, tintRanges, maxTintRanges, &plainString);
+    numTintStops = calculate_tint_stops_from_string (inputString, tintStops, maxTintStops, &plainString);
 
     NSMutableAttributedString *str = [[NSMutableAttributedString alloc] initWithString:[NSString stringWithUTF8String:plainString] attributes:attributes];
 
+    NSColor *highlightColor = NSColor.alternateSelectedControlColor;
+
     // add attributes
-    for (NSUInteger i = 0; i < numTintRanges/2; i++) {
-        int index0 = tintRanges[i*2+1];
-        int tint = tintRanges[i*2+0];
+    for (NSUInteger i = 0; i < numTintStops; i++) {
+        int index0 = tintStops[i].index;
         NSUInteger len = str.length - index0;
 
-        CGFloat blend = 1.f + 0.1 * tint;
-        if (blend < 0) {
-            blend = 0;
+        NSColor *finalColor = foregroundColor;
+        if (tintStops[i].has_rgb) {
+            finalColor = [NSColor colorWithRed:tintStops[i].r/255.0 green:tintStops[i].g/255.0 blue:tintStops[i].b/255.0 alpha:1];
         }
 
-        NSColor *tinted = [backgroundColor blendedColorWithFraction:blend ofColor:foregroundColor];
+        int tint = tintStops[i].tint;
+        if (tint < 0) {
+            tint = MAX(tint, -3);
+            const CGFloat factors[] = {.30f, .60f, .80f};
+            CGFloat blend = factors[3+tint];
+            finalColor = [backgroundColor blendedColorWithFraction:blend ofColor:finalColor];
+        }
+        else if (tint > 0) {
+            tint = MIN (tint, 3);
+            const CGFloat factors[] = {0, .25f, .50f};
+            CGFloat blend = factors[tint-1];
+            finalColor = [finalColor blendedColorWithFraction:blend ofColor:highlightColor];
+        }
 
         [str addAttributes:@{
-            NSForegroundColorAttributeName:tinted
+            NSForegroundColorAttributeName:finalColor
         } range:NSMakeRange(index0, len)];
     }
 
@@ -748,7 +761,7 @@ extern DB_functions_t *deadbeef;
 
         NSColor *imgColor = sel ? NSColor.alternateSelectedControlTextColor : NSColor.controlTextColor;
 
-        CGContextRef c = [[NSGraphicsContext currentContext] graphicsPort];
+        CGContextRef c = [[NSGraphicsContext currentContext] CGContext];
         CGContextSaveGState(c);
 
         NSRect maskRect = rect;
@@ -779,8 +792,11 @@ extern DB_functions_t *deadbeef;
             .plt = deadbeef->plt_get_curr (),
             .id = self.columns[col].type,
             .idx = idx,
-            .flags = DDB_TF_CONTEXT_HAS_ID|DDB_TF_CONTEXT_HAS_INDEX|DDB_TF_CONTEXT_TEXT_DIM,
+            .flags = DDB_TF_CONTEXT_HAS_ID|DDB_TF_CONTEXT_HAS_INDEX,
         };
+        if (!sel) {
+            ctx.flags |= DDB_TF_CONTEXT_TEXT_DIM;
+        }
 
         char text[1024] = "";
         deadbeef->tf_eval (&ctx, self.columns[col].bytecode, text, sizeof (text));
@@ -790,9 +806,15 @@ extern DB_functions_t *deadbeef;
 
         if (text[0]) {
             NSDictionary *attributes = sel?self.cellSelectedTextAttrsDictionary:self.cellTextAttrsDictionary;
-            NSColor *foreground = attributes[NSForegroundColorAttributeName];
+            NSAttributedString *attrString;
+            if (ctx.dimmed) {
+                NSColor *foreground = attributes[NSForegroundColorAttributeName];
 
-            NSMutableAttributedString *attrString = [self stringWithTintAttributesFromString:text initialAttributes:attributes                                                     foregroundColor:foreground backgroundColor:background];
+                attrString = [self stringWithTintAttributesFromString:text initialAttributes:attributes                                                     foregroundColor:foreground backgroundColor:background];
+            }
+            else {
+                attrString = [[NSAttributedString alloc] initWithString:[NSString stringWithUTF8String:text] attributes:attributes];
+            }
             [attrString drawInRect:rect];
         }
 
